@@ -5,6 +5,7 @@ import tempfile
 import subprocess
 import signal
 import resource
+import shutil
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -45,7 +46,6 @@ async def websocket_terminal(websocket: WebSocket):
         if language == "python":
             file_path = os.path.join(temp_dir.name, "script.py")
             with open(file_path, "w") as f:
-                # Set recursion limit in the script itself
                 f.write("import sys\nsys.setrecursionlimit(1000)\n")
                 f.write(code)
             cmd = ["python3", file_path]
@@ -54,7 +54,19 @@ async def websocket_terminal(websocket: WebSocket):
             file_path = os.path.join(temp_dir.name, "script.js")
             with open(file_path, "w") as f:
                 f.write(code)
-            cmd = ["node", file_path]
+
+            node_bin = None
+            for cand in ("node", "nodejs"):
+                if shutil.which(cand):
+                    node_bin = cand
+                    break
+            if not node_bin:
+                await websocket.send_text("Error: Node.js runtime not found on server.")
+                await websocket.send_json({"type": "done"})
+                await websocket.close()
+                return
+
+            cmd = [node_bin, file_path]
 
         elif language == "cpp":
             file_path = os.path.join(temp_dir.name, "program.cpp")
@@ -77,6 +89,7 @@ async def websocket_terminal(websocket: WebSocket):
             await websocket.send_json({"type": "done"})
             await websocket.close()
             return
+
     except Exception as e:
         await websocket.send_text(f"Internal error preparing code: {str(e)}")
         await websocket.send_json({"type": "done"})
@@ -87,20 +100,19 @@ async def websocket_terminal(websocket: WebSocket):
 
     if pid == 0:
         try:
-            # Set a time limit (e.g. 3 seconds)
             def timeout_handler(signum, frame):
                 os._exit(1)
             signal.signal(signal.SIGALRM, timeout_handler)
-            signal.alarm(3)
+            signal.alarm(3)  # Wall-clock timeout
 
-            # Memory limit (64 MB max RAM)
             resource.setrlimit(resource.RLIMIT_AS, (64 * 1024 * 1024, resource.RLIM_INFINITY))
-
             os.execvp(cmd[0], cmd)
         except Exception:
             os._exit(1)
     else:
         loop = asyncio.get_event_loop()
+        output_buffer = b""
+        MAX_OUTPUT = 32 * 1024  # 32KB max output
 
         def read_pty():
             try:
@@ -109,20 +121,41 @@ async def websocket_terminal(websocket: WebSocket):
                 return b""
 
         async def send_output():
-            while True:
-                data = await loop.run_in_executor(None, read_pty)
-                if data:
-                    if websocket.application_state == WebSocketState.CONNECTED:
-                        try:
-                            await websocket.send_text(data.decode(errors="ignore"))
-                        except Exception:
-                            break
-                else:
-                    break
+            nonlocal output_buffer
+            killed = False
             try:
-                await websocket.send_json({"type": "done"})
-            except:
-                pass
+                def kill_proc():
+                    nonlocal killed
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                        killed = True
+                    except Exception:
+                        pass
+
+                timeout_handler = loop.call_later(3.5, kill_proc)
+
+                while True:
+                    data = await loop.run_in_executor(None, read_pty)
+                    if data:
+                        output_buffer += data
+                        if len(output_buffer) > MAX_OUTPUT:
+                            os.kill(pid, signal.SIGKILL)
+                            await websocket.send_text("[Output truncated]\n")
+                            break
+                        if websocket.application_state == WebSocketState.CONNECTED:
+                            try:
+                                await websocket.send_text(data.decode(errors="ignore"))
+                            except:
+                                break
+                    else:
+                        break
+
+            finally:
+                timeout_handler.cancel()
+                try:
+                    await websocket.send_json({"type": "done"})
+                except:
+                    pass
 
         send_task = asyncio.create_task(send_output())
 
