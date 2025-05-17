@@ -1,4 +1,4 @@
-# Backend for WebSocket Code Executor with Token Authentication
+# Backend for WebSocket Code Executor 
 
 This backend provides a WebSocket endpoint to execute code snippets in various languages (Python, JavaScript, C++). It requires a secret token for authentication to secure WebSocket connections.
 
