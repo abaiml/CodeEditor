@@ -15,27 +15,29 @@ app.add_middleware(
 
 PISTON_API_URL = "https://emkc.org/api/v2/piston/execute"  # or your self-hosted endpoint
 
-class RunRequest(BaseModel):
-    language: str
+class CodeRequest(BaseModel):
     code: str
-    stdin: str = ""
+    language: str
 
 @app.post("/run")
-async def run_code(req: RunRequest):
+async def run_code(code_request: CodeRequest):
     payload = {
-        "language": req.language,
-        "source": req.code,
-        "stdin": req.stdin,
+        "language": code_request.language,
+        "version": "*",  # This uses the latest version of the language
+        "files": [
+            {
+                "name": f"main.{ 'cpp' if code_request.language == 'cpp' else 'py' if code_request.language == 'python' else 'js' }",
+                "content": code_request.code
+            }
+        ]
     }
+
     async with httpx.AsyncClient() as client:
         try:
-            response = await client.post(PISTON_API_URL, json=payload, timeout=20)
+            response = await client.post("https://emkc.org/api/v2/piston/execute", json=payload)
             response.raise_for_status()
-            data = response.json()
-            return {
-                "output": data.get("output", ""),
-                "run_time": data.get("run_time", None),
-                "language": data.get("language", req.language),
-            }
-        except Exception as e:
+            result = response.json()
+            output = result.get("run", {}).get("output", "")
+            return {"output": output}
+        except httpx.HTTPStatusError as e:
             return {"output": f"Error executing code: {str(e)}"}
