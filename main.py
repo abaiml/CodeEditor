@@ -1,13 +1,15 @@
 import os
 import pty
 import asyncio
+import tempfile
+import subprocess
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.websockets import WebSocketState
 
 app = FastAPI()
 
-# Update allowed origins to your frontend URL(s)
+# Update with your frontend URL
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["https://unique-kleicha-411291.netlify.app"],
@@ -16,14 +18,74 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 @app.websocket("/ws")
 async def websocket_terminal(websocket: WebSocket):
     await websocket.accept()
 
+    try:
+        # Receive initial message with code + language
+        init_msg = await websocket.receive_json()
+        code = init_msg.get("code")
+        language = init_msg.get("language")
+        if not code or not language:
+            await websocket.send_text("Error: Missing code or language.")
+            await websocket.close()
+            return
+    except Exception:
+        await websocket.send_text("Error: Failed to receive initial code and language.")
+        await websocket.close()
+        return
+
+    temp_dir = tempfile.TemporaryDirectory()
+    file_path = ""
+    cmd = []
+
+    try:
+        if language == "python":
+            file_path = os.path.join(temp_dir.name, "script.py")
+            with open(file_path, "w") as f:
+                f.write(code)
+            cmd = ["python3", file_path]
+
+        elif language == "javascript":
+            file_path = os.path.join(temp_dir.name, "script.js")
+            with open(file_path, "w") as f:
+                f.write(code)
+            cmd = ["node", file_path]
+
+        elif language == "cpp":
+            file_path = os.path.join(temp_dir.name, "program.cpp")
+            with open(file_path, "w") as f:
+                f.write(code)
+
+            exe_path = os.path.join(temp_dir.name, "program.out")
+            compile_proc = subprocess.run(
+                ["g++", file_path, "-o", exe_path], capture_output=True, text=True
+            )
+            if compile_proc.returncode != 0:
+                # Send compilation error back
+                await websocket.send_text(f"Compilation failed:\n{compile_proc.stderr}")
+                await websocket.close()
+                return
+            cmd = [exe_path]
+
+        else:
+            await websocket.send_text(f"Error: Language '{language}' not supported.")
+            await websocket.close()
+            return
+    except Exception as e:
+        await websocket.send_text(f"Internal error preparing code: {str(e)}")
+        await websocket.close()
+        return
+
     pid, fd = pty.fork()
     if pid == 0:
-        # Child process: replace with interpreter you want. For example:
-        os.execvp("python3", ["python3"])
+        # Child process: execute the user program inside PTY
+        try:
+            os.execvp(cmd[0], cmd)
+        except Exception:
+            os._exit(1)
     else:
         loop = asyncio.get_event_loop()
 
@@ -33,25 +95,30 @@ async def websocket_terminal(websocket: WebSocket):
             except OSError:
                 return b""
 
-        async def send_pty_output():
+        async def send_output():
             while True:
                 data = await loop.run_in_executor(None, read_pty)
                 if data:
                     if websocket.application_state == WebSocketState.CONNECTED:
                         try:
                             await websocket.send_text(data.decode(errors="ignore"))
-                        except:
+                        except Exception:
                             break
                 else:
+                    # PTY closed - program exited
                     break
 
-        send_task = asyncio.create_task(send_pty_output())
+        send_task = asyncio.create_task(send_output())
 
         try:
             while True:
-                data = await websocket.receive_text()
-                os.write(fd, data.encode())
-        except WebSocketDisconnect:
-            pass
+                try:
+                    data = await websocket.receive_text()
+                    os.write(fd, data.encode())
+                except WebSocketDisconnect:
+                    break
+                except Exception:
+                    break
         finally:
             send_task.cancel()
+            temp_dir.cleanup()
