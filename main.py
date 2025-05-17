@@ -1,7 +1,9 @@
-import httpx
-from fastapi import FastAPI
+import os
+import pty
+import asyncio
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from starlette.websockets import WebSocketState
 
 app = FastAPI()
 
@@ -9,35 +11,47 @@ app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["https://unique-kleicha-411291.netlify.app"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-PISTON_API_URL = "https://emkc.org/api/v2/piston/execute"  # or your self-hosted endpoint
+@app.websocket("/ws")
+async def websocket_terminal(websocket: WebSocket):
+    await websocket.accept()
 
-class CodeRequest(BaseModel):
-    code: str
-    language: str
+    pid, fd = pty.fork()
+    if pid == 0:
+        # Child process: replace with interpreter you want. For example:
+        os.execvp("python3", ["python3"])
+    else:
+        loop = asyncio.get_event_loop()
 
-@app.post("/run")
-async def run_code(code_request: CodeRequest):
-    payload = {
-        "language": code_request.language,
-        "version": "*",  # This uses the latest version of the language
-        "files": [
-            {
-                "name": f"main.{ 'cpp' if code_request.language == 'cpp' else 'py' if code_request.language == 'python' else 'js' }",
-                "content": code_request.code
-            }
-        ]
-    }
+        def read_pty():
+            try:
+                return os.read(fd, 1024)
+            except OSError:
+                return b""
 
-    async with httpx.AsyncClient() as client:
+        async def send_pty_output():
+            while True:
+                data = await loop.run_in_executor(None, read_pty)
+                if data:
+                    if websocket.application_state == WebSocketState.CONNECTED:
+                        try:
+                            await websocket.send_text(data.decode(errors="ignore"))
+                        except:
+                            break
+                else:
+                    break
+
+        send_task = asyncio.create_task(send_pty_output())
+
         try:
-            response = await client.post("https://emkc.org/api/v2/piston/execute", json=payload)
-            response.raise_for_status()
-            result = response.json()
-            output = result.get("run", {}).get("output", "")
-            return {"output": output}
-        except httpx.HTTPStatusError as e:
-            return {"output": f"Error executing code: {str(e)}"}
+            while True:
+                data = await websocket.receive_text()
+                os.write(fd, data.encode())
+        except WebSocketDisconnect:
+            pass
+        finally:
+            send_task.cancel()
