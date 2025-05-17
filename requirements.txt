@@ -2,3 +2,5 @@ fastapi
 uvicorn
 asyncio
 starlette
+tempfile
+subprocess
