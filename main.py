@@ -3,10 +3,6 @@ import pty
 import asyncio
 import tempfile
 import subprocess
-import signal
-import resource
-import shutil
-
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.websockets import WebSocketState
@@ -21,12 +17,24 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+running_processes = {}  # Track running child processes by websocket id
+
 @app.websocket("/ws")
 async def websocket_terminal(websocket: WebSocket):
     await websocket.accept()
+    ws_id = id(websocket)
 
     try:
         init_msg = await websocket.receive_json()
+        if init_msg.get("action") == "stop":
+            process_info = running_processes.pop(ws_id, None)
+            if process_info:
+                os.kill(process_info["pid"], 9)
+                await websocket.send_text("Execution stopped by user.")
+                await websocket.send_json({"type": "done"})
+            await websocket.close()
+            return
+
         code = init_msg.get("code")
         language = init_msg.get("language")
         if not code or not language:
@@ -46,7 +54,6 @@ async def websocket_terminal(websocket: WebSocket):
         if language == "python":
             file_path = os.path.join(temp_dir.name, "script.py")
             with open(file_path, "w") as f:
-                f.write("import sys\nsys.setrecursionlimit(1000)\n")
                 f.write(code)
             cmd = ["python3", file_path]
 
@@ -54,19 +61,7 @@ async def websocket_terminal(websocket: WebSocket):
             file_path = os.path.join(temp_dir.name, "script.js")
             with open(file_path, "w") as f:
                 f.write(code)
-
-            node_bin = None
-            for cand in ("node", "nodejs"):
-                if shutil.which(cand):
-                    node_bin = cand
-                    break
-            if not node_bin:
-                await websocket.send_text("Error: Node.js runtime not found on server.")
-                await websocket.send_json({"type": "done"})
-                await websocket.close()
-                return
-
-            cmd = [node_bin, file_path]
+            cmd = ["node", file_path]
 
         elif language == "cpp":
             file_path = os.path.join(temp_dir.name, "program.cpp")
@@ -89,7 +84,6 @@ async def websocket_terminal(websocket: WebSocket):
             await websocket.send_json({"type": "done"})
             await websocket.close()
             return
-
     except Exception as e:
         await websocket.send_text(f"Internal error preparing code: {str(e)}")
         await websocket.send_json({"type": "done"})
@@ -97,22 +91,14 @@ async def websocket_terminal(websocket: WebSocket):
         return
 
     pid, fd = pty.fork()
-
     if pid == 0:
         try:
-            def timeout_handler(signum, frame):
-                os._exit(1)
-            signal.signal(signal.SIGALRM, timeout_handler)
-            signal.alarm(3)  # Wall-clock timeout
-
-            resource.setrlimit(resource.RLIMIT_AS, (64 * 1024 * 1024, resource.RLIM_INFINITY))
             os.execvp(cmd[0], cmd)
         except Exception:
             os._exit(1)
     else:
         loop = asyncio.get_event_loop()
-        output_buffer = b""
-        MAX_OUTPUT = 32 * 1024  # 32KB max output
+        running_processes[ws_id] = {"pid": pid, "fd": fd, "temp_dir": temp_dir}
 
         def read_pty():
             try:
@@ -121,41 +107,20 @@ async def websocket_terminal(websocket: WebSocket):
                 return b""
 
         async def send_output():
-            nonlocal output_buffer
-            killed = False
-            try:
-                def kill_proc():
-                    nonlocal killed
-                    try:
-                        os.kill(pid, signal.SIGKILL)
-                        killed = True
-                    except Exception:
-                        pass
-
-                timeout_handler = loop.call_later(3.5, kill_proc)
-
-                while True:
-                    data = await loop.run_in_executor(None, read_pty)
-                    if data:
-                        output_buffer += data
-                        if len(output_buffer) > MAX_OUTPUT:
-                            os.kill(pid, signal.SIGKILL)
-                            await websocket.send_text("[Output truncated]\n")
+            while True:
+                data = await loop.run_in_executor(None, read_pty)
+                if data:
+                    if websocket.application_state == WebSocketState.CONNECTED:
+                        try:
+                            await websocket.send_text(data.decode(errors="ignore"))
+                        except Exception:
                             break
-                        if websocket.application_state == WebSocketState.CONNECTED:
-                            try:
-                                await websocket.send_text(data.decode(errors="ignore"))
-                            except:
-                                break
-                    else:
-                        break
-
-            finally:
-                timeout_handler.cancel()
-                try:
-                    await websocket.send_json({"type": "done"})
-                except:
-                    pass
+                else:
+                    break
+            try:
+                await websocket.send_json({"type": "done"})
+            except:
+                pass
 
         send_task = asyncio.create_task(send_output())
 
@@ -170,4 +135,5 @@ async def websocket_terminal(websocket: WebSocket):
                     break
         finally:
             send_task.cancel()
+            running_processes.pop(ws_id, None)
             temp_dir.cleanup()
