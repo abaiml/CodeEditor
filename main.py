@@ -9,7 +9,6 @@ from starlette.websockets import WebSocketState
 
 app = FastAPI()
 
-# Update with your frontend URL
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["https://unique-kleicha-411291.netlify.app"],
@@ -18,13 +17,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
 @app.websocket("/ws")
 async def websocket_terminal(websocket: WebSocket):
     await websocket.accept()
 
     try:
-        # Receive initial message with code + language
         init_msg = await websocket.receive_json()
         code = init_msg.get("code")
         language = init_msg.get("language")
@@ -33,7 +30,7 @@ async def websocket_terminal(websocket: WebSocket):
             await websocket.close()
             return
     except Exception:
-        await websocket.send_text("Error: Failed to receive initial code and language.")
+        await websocket.send_text("Error: Failed to receive code and language.")
         await websocket.close()
         return
 
@@ -64,24 +61,25 @@ async def websocket_terminal(websocket: WebSocket):
                 ["g++", file_path, "-o", exe_path], capture_output=True, text=True
             )
             if compile_proc.returncode != 0:
-                # Send compilation error back
                 await websocket.send_text(f"Compilation failed:\n{compile_proc.stderr}")
+                await websocket.send_json({ "type": "done" })  # Signal done on failure
                 await websocket.close()
                 return
             cmd = [exe_path]
 
         else:
-            await websocket.send_text(f"Error: Language '{language}' not supported.")
+            await websocket.send_text(f"Error: Unsupported language '{language}'.")
+            await websocket.send_json({ "type": "done" })
             await websocket.close()
             return
     except Exception as e:
         await websocket.send_text(f"Internal error preparing code: {str(e)}")
+        await websocket.send_json({ "type": "done" })
         await websocket.close()
         return
 
     pid, fd = pty.fork()
     if pid == 0:
-        # Child process: execute the user program inside PTY
         try:
             os.execvp(cmd[0], cmd)
         except Exception:
@@ -105,8 +103,13 @@ async def websocket_terminal(websocket: WebSocket):
                         except Exception:
                             break
                 else:
-                    # PTY closed - program exited
                     break
+
+            # After output is done
+            try:
+                await websocket.send_json({ "type": "done" })
+            except:
+                pass
 
         send_task = asyncio.create_task(send_output())
 
