@@ -19,8 +19,19 @@ app.add_middleware(
 
 running_processes = {}  # Track running child processes by websocket id
 
+# ───────────────────────
+# Secret token required
+# ───────────────────────
+EDITOR_TOKEN = os.getenv("EDITOR_TOKEN")  # Make sure this env var is set in your deployment
+
 @app.websocket("/ws")
 async def websocket_terminal(websocket: WebSocket):
+    # ── simple token check ──
+    token = websocket.query_params.get("t")
+    if token != EDITOR_TOKEN:
+        await websocket.close(code=1008)  # Policy Violation
+        return
+
     await websocket.accept()
     ws_id = id(websocket)
 
