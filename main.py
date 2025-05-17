@@ -3,6 +3,9 @@ import pty
 import asyncio
 import tempfile
 import subprocess
+import signal
+import resource
+
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.websockets import WebSocketState
@@ -42,6 +45,8 @@ async def websocket_terminal(websocket: WebSocket):
         if language == "python":
             file_path = os.path.join(temp_dir.name, "script.py")
             with open(file_path, "w") as f:
+                # Set recursion limit in the script itself
+                f.write("import sys\nsys.setrecursionlimit(1000)\n")
                 f.write(code)
             cmd = ["python3", file_path]
 
@@ -62,25 +67,35 @@ async def websocket_terminal(websocket: WebSocket):
             )
             if compile_proc.returncode != 0:
                 await websocket.send_text(f"Compilation failed:\n{compile_proc.stderr}")
-                await websocket.send_json({ "type": "done" })  # Signal done on failure
+                await websocket.send_json({"type": "done"})
                 await websocket.close()
                 return
             cmd = [exe_path]
 
         else:
             await websocket.send_text(f"Error: Unsupported language '{language}'.")
-            await websocket.send_json({ "type": "done" })
+            await websocket.send_json({"type": "done"})
             await websocket.close()
             return
     except Exception as e:
         await websocket.send_text(f"Internal error preparing code: {str(e)}")
-        await websocket.send_json({ "type": "done" })
+        await websocket.send_json({"type": "done"})
         await websocket.close()
         return
 
     pid, fd = pty.fork()
+
     if pid == 0:
         try:
+            # Set a time limit (e.g. 3 seconds)
+            def timeout_handler(signum, frame):
+                os._exit(1)
+            signal.signal(signal.SIGALRM, timeout_handler)
+            signal.alarm(3)
+
+            # Memory limit (64 MB max RAM)
+            resource.setrlimit(resource.RLIMIT_AS, (64 * 1024 * 1024, resource.RLIM_INFINITY))
+
             os.execvp(cmd[0], cmd)
         except Exception:
             os._exit(1)
@@ -104,10 +119,8 @@ async def websocket_terminal(websocket: WebSocket):
                             break
                 else:
                     break
-
-            # After output is done
             try:
-                await websocket.send_json({ "type": "done" })
+                await websocket.send_json({"type": "done"})
             except:
                 pass
 
