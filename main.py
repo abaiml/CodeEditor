@@ -66,13 +66,13 @@ async def websocket_terminal(websocket: WebSocket):
             file_path = os.path.join(temp_dir.name, "script.py")
             with open(file_path, "w") as f:
                 f.write(code)
-            cmd = ["python3", file_path]
+            cmd = ["python3", "-u", file_path]
 
         elif language == "javascript":
             file_path = os.path.join(temp_dir.name, "script.js")
             with open(file_path, "w") as f:
                 f.write(code)
-            cmd = ["node", file_path]
+            cmd = ["stdbuf", "-o0", "-e0", "node", file_path]
 
         elif language == "cpp":
             file_path = os.path.join(temp_dir.name, "program.cpp")
@@ -88,7 +88,7 @@ async def websocket_terminal(websocket: WebSocket):
                 await websocket.send_json({"type": "done"})
                 await websocket.close()
                 return
-            cmd = [exe_path]
+            cmd = ["stdbuf", "-o0", "-e0", exe_path]
 
         else:
             await websocket.send_text(f"Error: Unsupported language '{language}'.")
