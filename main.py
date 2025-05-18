@@ -103,10 +103,7 @@ async def websocket_terminal(websocket: WebSocket):
 
     pid, fd = pty.fork()
     if pid == 0:
-        try:
-            os.execvp(cmd[0], cmd)
-        except Exception:
-            os._exit(1)
+        os.execvp(cmd[0], cmd)
     else:
         loop = asyncio.get_event_loop()
         running_processes[ws_id] = {"pid": pid, "fd": fd, "temp_dir": temp_dir}
@@ -120,30 +117,21 @@ async def websocket_terminal(websocket: WebSocket):
         async def send_output():
             while True:
                 data = await loop.run_in_executor(None, read_pty)
-                if data:
-                    if websocket.application_state == WebSocketState.CONNECTED:
-                        try:
-                            await websocket.send_text(data.decode(errors="ignore"))
-                        except Exception:
-                            break
-                else:
+                if not data:
                     break
-            try:
-                await websocket.send_json({"type": "done"})
-            except:
-                pass
+                text = data.decode(errors="ignore")
+                if websocket.application_state == WebSocketState.CONNECTED:
+                    await websocket.send_json({"output": text})
+            await websocket.send_json({"type": "done"})
 
         send_task = asyncio.create_task(send_output())
 
         try:
             while True:
-                try:
-                    data = await websocket.receive_text()
-                    os.write(fd, data.encode())
-                except WebSocketDisconnect:
-                    break
-                except Exception:
-                    break
+                data = await websocket.receive_text()
+                os.write(fd, data.encode())
+        except WebSocketDisconnect:
+            pass
         finally:
             send_task.cancel()
             running_processes.pop(ws_id, None)
