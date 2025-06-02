@@ -142,44 +142,46 @@ async def websocket_terminal(websocket: WebSocket):
 # ────────────────────────────────
 @app.post("/format")
 async def format_code(request: Request):
-    body = await request.json()
-    code = body.get("code")
-    language = body.get("language")
+    data = await request.json()
+    code = data.get("code")
+    language = data.get("language")
 
     if not code or not language:
-        return JSONResponse(status_code=400, content={"error": "Missing code or language"})
+        raise HTTPException(status_code=400, detail="Missing code or language.")
 
-    try:
-        with tempfile.NamedTemporaryFile(mode="w+", suffix=f".{language}", delete=False) as temp_file:
-            temp_file.write(code)
-            temp_file.flush()
+    with tempfile.NamedTemporaryFile(delete=False, suffix=f".{language}") as temp:
+        temp.write(code.encode())
+        temp.flush()
 
-            formatted_code = ""
-
-            if language == "python":
-                result = subprocess.run(
-                    ["black", "--quiet", temp_file.name],
+        if language == "python":
+            try:
+                subprocess.run(
+                    ["black", "--quiet", temp.name],
+                    check=True,
                     capture_output=True,
+                    text=True
                 )
-                if result.returncode != 0:
-                    raise Exception(result.stderr.decode())
-
-                with open(temp_file.name, "r") as f:
+                with open(temp.name, "r") as f:
                     formatted_code = f.read()
-
-            elif language == "cpp":
+                return {"formatted": formatted_code}
+            except subprocess.CalledProcessError as e:
+                return JSONResponse(
+                    status_code=400,
+                    content={"error": "Black formatting failed", "details": e.stderr}
+                )
+        elif language == "cpp":
+            try:
                 result = subprocess.run(
-                    ["clang-format", temp_file.name],
+                    ["clang-format", temp.name],
                     capture_output=True,
                     text=True,
+                    check=True
                 )
-                if result.returncode != 0:
-                    raise Exception(result.stderr)
-                formatted_code = result.stdout
+                return {"formatted": result.stdout}
+            except subprocess.CalledProcessError as e:
+                return JSONResponse(
+                    status_code=400,
+                    content={"error": "Clang formatting failed", "details": e.stderr}
+                )
 
-            else:
-                return JSONResponse(status_code=400, content={"error": "Unsupported language"})
-
-            return {"formatted": formatted_code}
-    except Exception as e:
-        return JSONResponse(status_code=500, content={"error": str(e)})
+    raise HTTPException(status_code=400, detail="Unsupported language")
