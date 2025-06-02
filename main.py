@@ -3,9 +3,10 @@ import pty
 import asyncio
 import tempfile
 import subprocess
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.websockets import WebSocketState
+from fastapi.responses import JSONResponse
 
 app = FastAPI()
 
@@ -19,17 +20,16 @@ app.add_middleware(
 
 running_processes = {}  # Track running child processes by websocket id
 
-# ───────────────────────
-# Secret token required
-# ───────────────────────
-EDITOR_TOKEN = os.getenv("EDITOR_TOKEN")  # Make sure this env var is set in your deployment
+EDITOR_TOKEN = os.getenv("EDITOR_TOKEN")  # Required for WebSocket
 
+# ────────────────────────────────
+# WebSocket Terminal Execution
+# ────────────────────────────────
 @app.websocket("/ws")
 async def websocket_terminal(websocket: WebSocket):
-    # ── simple token check ──
     token = websocket.query_params.get("t")
     if token != EDITOR_TOKEN:
-        await websocket.close(code=1008)  # Policy Violation
+        await websocket.close(code=1008)
         return
 
     await websocket.accept()
@@ -136,3 +136,50 @@ async def websocket_terminal(websocket: WebSocket):
             send_task.cancel()
             running_processes.pop(ws_id, None)
             temp_dir.cleanup()
+
+# ────────────────────────────────
+# POST /format - Auto Code Formatter
+# ────────────────────────────────
+@app.post("/format")
+async def format_code(request: Request):
+    body = await request.json()
+    code = body.get("code")
+    language = body.get("language")
+
+    if not code or not language:
+        return JSONResponse(status_code=400, content={"error": "Missing code or language"})
+
+    try:
+        with tempfile.NamedTemporaryFile(mode="w+", suffix=f".{language}", delete=False) as temp_file:
+            temp_file.write(code)
+            temp_file.flush()
+
+            formatted_code = ""
+
+            if language == "python":
+                result = subprocess.run(
+                    ["black", "--quiet", temp_file.name],
+                    capture_output=True,
+                )
+                if result.returncode != 0:
+                    raise Exception(result.stderr.decode())
+
+                with open(temp_file.name, "r") as f:
+                    formatted_code = f.read()
+
+            elif language == "cpp":
+                result = subprocess.run(
+                    ["clang-format", temp_file.name],
+                    capture_output=True,
+                    text=True,
+                )
+                if result.returncode != 0:
+                    raise Exception(result.stderr)
+                formatted_code = result.stdout
+
+            else:
+                return JSONResponse(status_code=400, content={"error": "Unsupported language"})
+
+            return {"formatted": formatted_code}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
