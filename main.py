@@ -172,11 +172,13 @@ async def format_code(request: Request):
         elif language == "cpp":
             try:
                 result = subprocess.run(
-                    ["clang-format", temp.name],
-                    capture_output=True,
-                    text=True,
-                    check=True
+                    ["clang-format", "-style={IndentWidth: 4, TabWidth: 4, UseTab: Never}"],
+                    input=code.encode(),
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=True 
                 )
+
                 return {"formatted": result.stdout}
             except subprocess.CalledProcessError as e:
                 return JSONResponse(
