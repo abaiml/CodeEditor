@@ -2,4 +2,3 @@ fastapi
 uvicorn[standard]
 black
 clang-format
-python-dotenv
